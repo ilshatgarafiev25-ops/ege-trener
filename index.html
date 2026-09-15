@@ -369,8 +369,21 @@ async function upsertQuestion(q) {
   return !error ? null : error;
 }
 async function deleteQuestionRow(id) {
-  const { error } = await sb.from("questions").delete().eq("id", id);
-  return error || null;
+  const { data, error } = await sb.from("questions").delete().eq("id", id).select("id");
+  if (error) return error;
+  if (!data || data.length === 0) return { message: "база не удалила задание (нет прав на удаление)" };
+  return null;
+}
+async function deleteQuestionRows(ids) {
+  // Удаляем пачками по 100 и считаем, сколько реально удалено.
+  let deleted = 0;
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100);
+    const { data, error } = await sb.from("questions").delete().in("id", chunk).select("id");
+    if (error) return { deleted, error };
+    deleted += data ? data.length : 0;
+  }
+  return { deleted, error: null };
 }
 async function uploadQuestionImage(file, filename) {
   const blob = await compressImageToBlob(file);
@@ -408,7 +421,15 @@ async function insertTest(t) {
   return error || null;
 }
 async function deleteTestRow(id) {
-  await sb.from("tests").delete().eq("id", id);
+  // Сначала ответы учеников на этот тест (иначе база может не дать удалить тест),
+  // затем сам тест. .select() нужен, чтобы увидеть «удалено 0 строк» — при нехватке
+  // прав Supabase не возвращает ошибку, а просто ничего не удаляет.
+  const r1 = await sb.from("submissions").delete().eq("test_id", id);
+  if (r1.error) return r1.error;
+  const { data, error } = await sb.from("tests").delete().eq("id", id).select("id");
+  if (error) return error;
+  if (!data || data.length === 0) return { message: "база не удалила тест (нет прав на удаление или тест уже удалён)" };
+  return null;
 }
 async function updateTest(t) {
   const { error } = await sb.from("tests").update({
@@ -720,11 +741,16 @@ function BankTab({ bank, onReload }) {
   }
   async function deleteSelected() {
     setBulkBusy(true);
-    for (const id of selected) {
-      await deleteQuestionRow(id);
+    setError("");
+    const ids = [...selected];
+    const res = await deleteQuestionRows(ids);
+    setBulkBusy(false);
+    if (res.error || res.deleted < ids.length) {
+      const m = "Удалено " + res.deleted + " из " + ids.length + " заданий." + (res.error ? " Ошибка: " + (res.error.message || String(res.error)) : " Остальные база не удалила (нет прав на удаление).");
+      setError(m);
+      window.alert(m);
     }
     setSelected(/* @__PURE__ */ new Set());
-    setBulkBusy(false);
     onReload();
   }
   function toggleCorrectIdx(i) {
@@ -882,7 +908,7 @@ function BankTab({ bank, onReload }) {
   async function removeFromBank(id) {
     const err = await deleteQuestionRow(id);
     if (err) {
-      setError("Не удалось удалить задание в Supabase: " + err.message + ". Возможно, не хватает политики RLS на удаление в таблице questions (см. fix storage/tests policy scripts).");
+      window.alert("Не удалось удалить задание: " + err.message); setError("Не удалось удалить задание в Supabase: " + err.message + ". Возможно, не хватает политики RLS на удаление в таблице questions (см. fix storage/tests policy scripts).");
       return;
     }
     if (id === editingId) cancelEdit();
@@ -1067,7 +1093,14 @@ function TestsTab({ bank, tests, onReload }) {
     onReload();
   }
   async function removeTest(id) {
-    await deleteTestRow(id);
+    const delErr = await deleteTestRow(id);
+    if (delErr) {
+      const m = "Не удалось удалить тест: " + (delErr.message || String(delErr));
+      setError(m);
+      window.alert(m);
+      onReload();
+      return;
+    }
     if (editingTest && editingTest.id === id) cancelEditTest();
     onReload();
   }
@@ -1223,7 +1256,7 @@ function TestsTab({ bank, tests, onReload }) {
         /* @__PURE__ */ React.createElement("span", { className: "q-meta" }, selCountTopic, "/", topicIds.length, " ", isTopicCollapsed ? "\u25B8" : "\u25BE")
       ), !isTopicCollapsed && group.topics[topic].map((q) => /* @__PURE__ */ React.createElement("label", { className: "opt", key: q.id, style: { marginLeft: 24 } }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: selected.has(q.id), onChange: () => toggle(q.id) }), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("span", { className: "q-type-tag" }, TYPE_LABEL[q.type]), q.text.slice(0, 100), q.text.length > 100 ? "\u2026" : ""))));
     }));
-  }), error && /* @__PURE__ */ React.createElement("div", { className: "notice", style: { borderLeftColor: "var(--red)" } }, error), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } }, /* @__PURE__ */ React.createElement("button", { className: "btn", disabled: busy, onClick: createTest }, busy ? "\u0421\u043E\u0445\u0440\u0430\u043D\u044F\u044E\u2026" : editingTest ? "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F" : "\u0421\u043E\u0437\u0434\u0430\u0442\u044C \u0442\u0435\u0441\u0442"), editingTest && /* @__PURE__ */ React.createElement("button", { className: "btn ghost", onClick: cancelEditTest }, "\u041E\u0442\u043C\u0435\u043D\u0430")))), /* @__PURE__ */ React.createElement("div", { className: "card" }, /* @__PURE__ */ React.createElement("h2", null, "\u0421\u043E\u0437\u0434\u0430\u043D\u043D\u044B\u0435 \u0442\u0435\u0441\u0442\u044B (", tests.length, ")"), tests.length === 0 && /* @__PURE__ */ React.createElement("div", { className: "empty" }, "\u041F\u043E\u043A\u0430 \u043D\u0438 \u043E\u0434\u043D\u043E\u0433\u043E \u0442\u0435\u0441\u0442\u0430."), tests.map((t) => /* @__PURE__ */ React.createElement("div", { className: "q-list-item", key: t.id, style: editingTest && editingTest.id === t.id ? { background: "#f6f3ea", borderRadius: 8 } : {} }, /* @__PURE__ */ React.createElement("div", { className: "q-text", style: { fontWeight: 600 } }, t.name, " ", /* @__PURE__ */ React.createElement("span", { className: "q-type-tag", style: { background: t.training ? "#fbe9d8" : "#eef1e6", color: t.training ? "var(--amber)" : "var(--teal-deep)" } }, t.training ? "\u0442\u0440\u0435\u043D\u0438\u0440\u043E\u0432\u043E\u0447\u043D\u044B\u0439" : "\u044D\u043A\u0437\u0430\u043C\u0435\u043D")), /* @__PURE__ */ React.createElement("div", { className: "q-meta" }, t.questionIds.length, " \u0437\u0430\u0434\u0430\u043D\u0438\u0439 \xB7 \u0434\u0430\u0439\u0442\u0435 \u0443\u0447\u0435\u043D\u0438\u043A\u0430\u043C \u044D\u0442\u043E\u0442 \u043A\u043E\u0434:"), /* @__PURE__ */ React.createElement("div", { style: { margin: "8px 0" } }, /* @__PURE__ */ React.createElement("span", { className: "test-code" }, t.code)), /* @__PURE__ */ React.createElement("button", { className: "btn ghost small", style: { marginRight: 6 }, onClick: () => startEditTest(t) }, "\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u0442\u044c"), /* @__PURE__ */ React.createElement("button", { className: "btn ghost small", style: { marginRight: 8 }, onClick: () => setPreviewTest(t) }, "\u041F\u0440\u0435\u0434\u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440"), /* @__PURE__ */ React.createElement(ConfirmButton, { label: "\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0442\u0435\u0441\u0442", confirmLabel: "\u0422\u043E\u0447\u043D\u043E \u0443\u0434\u0430\u043B\u0438\u0442\u044C \u0442\u0435\u0441\u0442?", onConfirm: () => removeTest(t.id) })))));
+  }), error && /* @__PURE__ */ React.createElement("div", { className: "notice", style: { borderLeftColor: "var(--red)" } }, error), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } }, /* @__PURE__ */ React.createElement("button", { className: "btn", disabled: busy, onClick: createTest }, busy ? "\u0421\u043E\u0445\u0440\u0430\u043D\u044F\u044E\u2026" : editingTest ? "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F" : "\u0421\u043E\u0437\u0434\u0430\u0442\u044C \u0442\u0435\u0441\u0442"), editingTest && /* @__PURE__ */ React.createElement("button", { className: "btn ghost", onClick: cancelEditTest }, "\u041E\u0442\u043C\u0435\u043D\u0430")))), /* @__PURE__ */ React.createElement("div", { className: "card" }, /* @__PURE__ */ React.createElement("h2", null, "\u0421\u043E\u0437\u0434\u0430\u043D\u043D\u044B\u0435 \u0442\u0435\u0441\u0442\u044B (", tests.length, ")"), tests.length === 0 && /* @__PURE__ */ React.createElement("div", { className: "empty" }, "\u041F\u043E\u043A\u0430 \u043D\u0438 \u043E\u0434\u043D\u043E\u0433\u043E \u0442\u0435\u0441\u0442\u0430."), tests.map((t) => /* @__PURE__ */ React.createElement("div", { className: "q-list-item", key: t.id, style: editingTest && editingTest.id === t.id ? { background: "#f6f3ea", borderRadius: 8 } : {} }, /* @__PURE__ */ React.createElement("div", { className: "q-text", style: { fontWeight: 600 } }, t.name, " ", /* @__PURE__ */ React.createElement("span", { className: "q-type-tag", style: { background: t.training ? "#fbe9d8" : "#eef1e6", color: t.training ? "var(--amber)" : "var(--teal-deep)" } }, t.training ? "\u0442\u0440\u0435\u043D\u0438\u0440\u043E\u0432\u043E\u0447\u043D\u044B\u0439" : "\u044D\u043A\u0437\u0430\u043C\u0435\u043D")), /* @__PURE__ */ React.createElement("div", { className: "q-meta" }, t.questionIds.length, " \u0437\u0430\u0434\u0430\u043D\u0438\u0439 \xB7 \u0434\u0430\u0439\u0442\u0435 \u0443\u0447\u0435\u043D\u0438\u043A\u0430\u043C \u044D\u0442\u043E\u0442 \u043A\u043E\u0434:"), /* @__PURE__ */ React.createElement("div", { style: { margin: "8px 0" } }, /* @__PURE__ */ React.createElement("span", { className: "test-code" }, t.code)), /* @__PURE__ */ React.createElement("button", { className: "btn ghost small", style: { marginRight: 6 }, onClick: () => startEditTest(t) }, "\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u0442\u044c"), /* @__PURE__ */ React.createElement("button", { className: "btn ghost small", style: { marginRight: 8 }, onClick: () => setPreviewTest(t) }, "\u041F\u0440\u0435\u0434\u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440"), /* @__PURE__ */ React.createElement(ConfirmButton, { label: "\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0442\u0435\u0441\u0442", confirmLabel: "Точно удалить тест вместе с ответами учеников?", onConfirm: () => removeTest(t.id) })))));
 }
 function GradeTab({ tests, bank }) {
   const [testId, setTestId] = useState("");
